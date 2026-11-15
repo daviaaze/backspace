@@ -55,6 +55,7 @@ import { migrateUserData } from './userDataMigration';
 import { isNavigationAllowed } from './navigationPolicy';
 import { NotificationRetainer } from './notificationRetention';
 import { isPopoutWindowName, isPopoutWindowOpenAllowed } from './popoutPolicy';
+import { setHyprlandPinned } from './hyprlandPin';
 import {
   screenSharePickerMode,
   isPendingSelectionFresh,
@@ -88,6 +89,7 @@ app.setName('Backspace');
 
 let mainWindow: BrowserWindow | null = null;
 const popoutWindows = new Map<string, BrowserWindow>();
+const popoutFloated = new Map<string, { value: boolean }>();
 const keybindManager = new KeybindManager();
 let tray: Tray | null = null;
 let isQuitting = false;
@@ -534,7 +536,10 @@ function createWindow(): void {
     const name = details.frameName;
     popoutWindows.set(name, win);
     win.on('closed', () => {
-      if (popoutWindows.get(name) === win) popoutWindows.delete(name);
+      if (popoutWindows.get(name) === win) {
+        popoutWindows.delete(name);
+        popoutFloated.delete(name);
+      }
     });
   });
 
@@ -670,12 +675,19 @@ function takePendingScreenSelection(): PendingScreenSelection | null {
 }
 
 function registerIpcHandlers(): void {
-  ipcMain.handle('popout-set-always-on-top', (event, name: unknown, pinned: unknown) => {
+  ipcMain.handle('popout-set-always-on-top', async (event, name: unknown, pinned: unknown) => {
     if (!isPopoutWindowName(name) || typeof pinned !== 'boolean') return false;
     const win = popoutWindows.get(name);
     if (!win || win.isDestroyed()) return false;
     if (event.sender !== mainWindow?.webContents && event.sender !== win.webContents) return false;
     win.setAlwaysOnTop(pinned, 'floating');
+    // Wayland ignores always-on-top; Hyprland's "pin" is the equivalent.
+    if (process.platform === 'linux' && process.env.HYPRLAND_INSTANCE_SIGNATURE) {
+      const floated = popoutFloated.get(name) ?? { value: false };
+      popoutFloated.set(name, floated);
+      const result = await setHyprlandPinned(process.pid, 'io.github.TheZwiss.backspace', win.getTitle(), pinned, floated);
+      if (result !== null) return result;
+    }
     return win.isAlwaysOnTop();
   });
   ipcMain.handle('popout-get-always-on-top', (event, name: unknown) => {
