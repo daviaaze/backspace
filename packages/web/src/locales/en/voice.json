@@ -163,7 +163,13 @@
     "watch": "Watch Stream",
     "watchShort": "Watch",
     "mute": "Mute Stream",
-    "isStreaming": "{{name}} is streaming"
+    "isStreaming": "{{name}} is streaming",
+    "popout": "Pop out stream",
+    "popoutPlaceholder": "Stream in separate window",
+    "popoutReturn": "Bring back",
+    "popoutClose": "Close",
+    "pin": "Pin on top",
+    "unpin": "Unpin"
   },
   "streamDiagnostics": {
     "publisherNetwork": "The streamer's network is unstable",

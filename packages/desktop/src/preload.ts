@@ -1,6 +1,10 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
 contextBridge.exposeInMainWorld('backspace', {
+  setPopoutAlwaysOnTop: (name: string, pinned: boolean): Promise<boolean> =>
+    ipcRenderer.invoke('popout-set-always-on-top', name, pinned),
+  getPopoutAlwaysOnTop: (name: string): Promise<boolean> =>
+    ipcRenderer.invoke('popout-get-always-on-top', name),
   // Platform info
   platform: process.platform,
   // Window controls

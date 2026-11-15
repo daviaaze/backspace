@@ -163,7 +163,13 @@
     "watch": "Stream ansehen",
     "watchShort": "Ansehen",
     "mute": "Stream stummschalten",
-    "isStreaming": "{{name}} streamt"
+    "isStreaming": "{{name}} streamt",
+    "popout": "Stream auskoppeln",
+    "popoutPlaceholder": "Stream in separatem Fenster",
+    "popoutReturn": "Zurückholen",
+    "popoutClose": "Schließen",
+    "pin": "Immer im Vordergrund",
+    "unpin": "Anheften lösen"
   },
   "streamDiagnostics": {
     "publisherNetwork": "Das Netzwerk des Streamers ist instabil",

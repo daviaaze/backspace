@@ -54,6 +54,7 @@ import {
 import { migrateUserData } from './userDataMigration';
 import { isNavigationAllowed } from './navigationPolicy';
 import { NotificationRetainer } from './notificationRetention';
+import { isPopoutWindowName, isPopoutWindowOpenAllowed } from './popoutPolicy';
 import {
   screenSharePickerMode,
   isPendingSelectionFresh,
@@ -86,6 +87,7 @@ app.setName('Backspace');
 }
 
 let mainWindow: BrowserWindow | null = null;
+const popoutWindows = new Map<string, BrowserWindow>();
 const keybindManager = new KeybindManager();
 let tray: Tray | null = null;
 let isQuitting = false;
@@ -488,7 +490,26 @@ function createWindow(): void {
 
   // Intercept own-instance /join/* URLs so they open in-app instead of the
   // system browser. Other URLs continue to open externally.
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+  mainWindow.webContents.setWindowOpenHandler(({ url, frameName }) => {
+    if (isPopoutWindowOpenAllowed(frameName, url)) {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          width: 960,
+          height: 540,
+          minWidth: 320,
+          minHeight: 180,
+          autoHideMenuBar: true,
+          backgroundColor: '#0b0b10',
+          webPreferences: {
+            preload: path.join(__dirname, 'preload.js'),
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: true,
+          },
+        },
+      };
+    }
     try {
       const u = new URL(url);
       if (
@@ -504,6 +525,17 @@ function createWindow(): void {
       shell.openExternal(url);
     }
     return { action: 'deny' };
+  });
+  mainWindow.webContents.on('did-create-window', (win, details) => {
+    if (!isPopoutWindowName(details.frameName)) {
+      win.close();
+      return;
+    }
+    const name = details.frameName;
+    popoutWindows.set(name, win);
+    win.on('closed', () => {
+      if (popoutWindows.get(name) === win) popoutWindows.delete(name);
+    });
   });
 
   // Deny foreign top-level navigations. See navigationPolicy.ts for the
@@ -638,6 +670,21 @@ function takePendingScreenSelection(): PendingScreenSelection | null {
 }
 
 function registerIpcHandlers(): void {
+  ipcMain.handle('popout-set-always-on-top', (event, name: unknown, pinned: unknown) => {
+    if (!isPopoutWindowName(name) || typeof pinned !== 'boolean') return false;
+    const win = popoutWindows.get(name);
+    if (!win || win.isDestroyed()) return false;
+    if (event.sender !== mainWindow?.webContents && event.sender !== win.webContents) return false;
+    win.setAlwaysOnTop(pinned, 'floating');
+    return win.isAlwaysOnTop();
+  });
+  ipcMain.handle('popout-get-always-on-top', (event, name: unknown) => {
+    if (!isPopoutWindowName(name)) return false;
+    const win = popoutWindows.get(name);
+    if (!win || win.isDestroyed()) return false;
+    if (event.sender !== mainWindow?.webContents && event.sender !== win.webContents) return false;
+    return win.isAlwaysOnTop();
+  });
   ipcMain.on('show-notification', (event, data: { title: string; body: string; options?: { channelId?: string; spaceId?: string; userId?: string } }) => {
     if (event.sender !== mainWindow?.webContents) return;
     const sender = event.sender;

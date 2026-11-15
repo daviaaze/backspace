@@ -79,6 +79,9 @@ interface DesktopUpdateSnapshot {
 }
 
 interface BackspaceElectronAPI {
+  // Optional: the current shell supports native pop-out pinning; older shells do not.
+  setPopoutAlwaysOnTop?: (name: string, pinned: boolean) => Promise<boolean>;
+  getPopoutAlwaysOnTop?: (name: string) => Promise<boolean>;
   // Platform info
   platform: NodeJS.Platform;
   // Window controls
