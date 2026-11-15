@@ -56,13 +56,25 @@ export function planPin(client: HyprlandClient, pinned: boolean, restoreTiling: 
   return steps;
 }
 
-function hyprctl(args: string[]): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile('hyprctl', args, { timeout: 3000, maxBuffer: 2 * 1024 * 1024 }, (error, stdout) => {
-      if (error) reject(error);
-      else resolve(stdout);
-    });
-  });
+// The AppImage FHS profile replaces PATH, so also try where NixOS puts it.
+const HYPRCTL_CANDIDATES = ['hyprctl', '/run/current-system/sw/bin/hyprctl'];
+
+async function hyprctl(args: string[]): Promise<string> {
+  let lastError: unknown;
+  for (const binary of HYPRCTL_CANDIDATES) {
+    try {
+      return await new Promise<string>((resolve, reject) => {
+        execFile(binary, args, { timeout: 3000, maxBuffer: 2 * 1024 * 1024 }, (error, stdout) => {
+          if (error) reject(error);
+          else resolve(stdout);
+        });
+      });
+    } catch (error) {
+      lastError = error;
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+  throw lastError;
 }
 
 async function readClient(pid: number, windowClass: string, title: string): Promise<HyprlandClient | null> {
