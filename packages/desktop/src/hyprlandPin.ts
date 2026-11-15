@@ -96,14 +96,18 @@ export async function setHyprlandPinned(
 ): Promise<boolean | null> {
   try {
     const client = await readClient(pid, windowClass, title);
-    if (!client) return null;
+    if (!client) {
+      console.warn('[Main:Popout] No unique Hyprland window for', { pid, windowClass, title });
+      return null;
+    }
     if (pinned && !client.floating) madeFloating.value = true;
     for (const step of planPin(client, pinned, madeFloating.value)) {
       await hyprctl(['dispatch', ...step]);
     }
     if (!pinned) madeFloating.value = false;
     return (await readClient(pid, windowClass, title))?.pinned ?? null;
-  } catch {
+  } catch (error) {
+    console.warn('[Main:Popout] Hyprland pin failed:', error);
     return null;
   }
 }
