@@ -27,6 +27,7 @@ import {
 import { getUpdateCapability, isSandboxed } from './updateCapability';
 import { ownAudioInSystemAudio } from './systemAudioCapability';
 import { createSystemAudioController, withSystemAudioSource, type PatchBayModule } from './systemAudio';
+import { chooseAudioSources } from './audioSourcePicker';
 import { loadDismissedVersion, setDismissedVersion } from './updateDismissal';
 import { purgeUpdaterCache } from './updaterCache';
 import {
@@ -596,6 +597,9 @@ const systemAudio = createSystemAudioController({
   isSandboxed,
   log: (message, ...args) => console.warn('[Main:SystemAudio]', message, ...args),
 });
+// Once Linux source selection is in use, never widen a failed/cancelled
+// selection to Chromium's whole-desktop loopback.
+let suppressSystemAudioLoopback = false;
 /** Last enumeration, so a preselected id resolves to its DesktopCapturerSource without a second scan. */
 let lastScreenSources: Electron.DesktopCapturerSource[] = [];
 /** Last list handed to the renderer, and when: what a throttled or unfocused caller gets back. */
@@ -829,9 +833,16 @@ function registerIpcHandlers(): void {
   // The virtual source that carries every other app's playback (Linux). The
   // renderer opens it like a microphone and calls stop when the share, or its
   // audio, ends.
-  ipcMain.handle('system-audio-start', (event) => {
-    if (event.sender !== mainWindow?.webContents) return { ok: false, reason: 'unsupported-platform' };
-    return systemAudio.start();
+  ipcMain.handle('system-audio-start', async (event) => {
+    const parent = mainWindow;
+    if (!parent || event.sender !== parent.webContents) return { ok: false, reason: 'unsupported-platform' };
+    if (!systemAudio.isAvailable()) return systemAudio.start();
+    suppressSystemAudioLoopback = true;
+    const selection = await chooseAudioSources(parent, () => systemAudio.listSources());
+    if (!selection || parent.isDestroyed() || parent !== mainWindow) {
+      return { ok: false, reason: 'cancelled' };
+    }
+    return systemAudio.start(selection);
   });
   ipcMain.handle('system-audio-stop', (event) => {
     if (event.sender !== mainWindow?.webContents) return;
@@ -1332,7 +1343,7 @@ if (!gotTheLock) {
             return;
           }
           console.log('[Main:ScreenShare] Using preselected source:', pending.sourceId, 'audio:', pending.shareAudio);
-          callback({ video: selected, ...(pending.shareAudio ? { audio: 'loopback' } : {}) });
+          callback({ video: selected, ...(pending.shareAudio && !suppressSystemAudioLoopback ? { audio: 'loopback' } : {}) });
           return;
         }
 
@@ -1355,7 +1366,7 @@ if (!gotTheLock) {
           // captured against the setting it thinks is in force.
           const shareAudio = lastSystemPickerShareAudio ?? false;
           console.log('[Main:ScreenShare] System picker returned one source:', sources[0]!.id, 'audio:', shareAudio);
-          callback({ video: sources[0]!, ...(shareAudio ? { audio: 'loopback' } : {}) });
+          callback({ video: sources[0]!, ...(shareAudio && !suppressSystemAudioLoopback ? { audio: 'loopback' } : {}) });
           return;
         }
 
@@ -1395,7 +1406,7 @@ if (!gotTheLock) {
         //     `PulseaudioLoopbackForScreenShare` feature flag we enable above.
         //     Fails on PipeWire-only systems without pulse compat — the
         //     renderer catches that and toasts the user.
-        callback({ video: selected, ...(shareAudio ? { audio: 'loopback' } : {}) });
+        callback({ video: selected, ...(shareAudio && !suppressSystemAudioLoopback ? { audio: 'loopback' } : {}) });
       } catch (err) {
         console.error('[Main:ScreenShare] Handler error:', err);
         // @ts-ignore — deny the request without crashing
