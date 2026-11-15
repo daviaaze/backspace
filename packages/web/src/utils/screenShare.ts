@@ -494,7 +494,6 @@ export async function publishScreenShare(
       } : {}),
     });
     videoPublished = true;
-    if (audioToPublish) await publishScreenShareAudioTrack(room, audioToPublish);
 
     _requestedPublishedScreenShareCodec = opts.publish.videoCodec;
     _publishedScreenShareCodec = null;

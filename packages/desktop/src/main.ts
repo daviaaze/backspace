@@ -1290,7 +1290,13 @@ if (process.platform === 'linux') {
   // Without it, returning `audio: 'loopback'` from setDisplayMediaRequestHandler
   // fails the whole getDisplayMedia request — screen share never starts when the
   // user has "Share system audio" enabled.
-  app.commandLine.appendSwitch('enable-features', 'PulseaudioLoopbackForScreenShare');
+  // Opt into Chromium's Linux VA-API encoder and preserve caller features.
+  const requestedFeatures = app.commandLine.getSwitchValue('enable-features');
+  app.commandLine.appendSwitch('enable-features', [
+    requestedFeatures,
+    'PulseaudioLoopbackForScreenShare',
+    'AcceleratedVideoEncoder',
+  ].filter(Boolean).join(','));
 }
 
 // Windows: AppUserModelId so toast notifications attribute correctly to Backspace

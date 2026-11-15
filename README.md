@@ -34,6 +34,27 @@ commercial license is available if the AGPL doesn't fit your use. See
 > Backspace 1.x. Stable, self-hostable, and actively developed. The release
 > badge above tracks the current version.
 
+## Community fork
+
+This branch is based on upstream v1.11.0 and adds Linux playback-source
+selection, a themed desktop audio picker, stream pop-outs with Hyprland pinning,
+and H.264 parameter-set ordering repair for affected Mesa/radeonsi VA-API encoders.
+The Linux desktop enables Chromium's accelerated encoder while preserving
+caller-supplied feature flags. Update the server to this branch's image before
+updating the desktop: older/upstream interfaces do not install the encoded-video
+repair worker and may display black video from affected hardware encoders.
+
+Fresh instances offer resolutions through 2160p and native capture. Existing
+instances retain their stored policy; an admin must enable 2160p/native in
+Instance Settings → Streaming. A resolution is a capture target, not a guarantee
+that WebRTC will retain it under CPU/bandwidth pressure. The text preset prefers
+maintaining resolution; the gaming preset permits resolution/FPS adaptation.
+
+The H.264 repair was causally verified with synthetic WebRTC on an RX 6700 XT:
+116 frames encoded and decoded by VA-API with no dropped frames. This is not a
+claim of a completed LiveKit call between two computers. Nix packaging and
+deployment instructions are in [backspace-nix](https://github.com/daviaaze/backspace-nix).
+
 ## What makes Backspace different
 
 Self-hosted chat usually forces a trade-off: gaming-grade voice and video, *or* a

@@ -40,6 +40,7 @@ import {
   resolveNativeOverdrive,
   syncScreenShareAudio,
 } from '../utils/screenShare';
+import { attachH264SenderTransform, detachH264SenderTransform } from '../utils/h264SenderTransform';
 import { encodeStreamWatch, parseShareSignal, parseStreamWatch, streamWatchFor, streamWatchKey } from '../utils/streamWatchProtocol';
 import { StreamRepublishTracker } from '../utils/streamRepublish';
 import { StreamResumeMemory, type RememberedStream } from '../utils/streamResume';
@@ -888,6 +889,14 @@ export function useLiveKit() {
         guardedUpdate();
       });
       newRoom.on(RoomEvent.LocalTrackPublished, (publication: LocalTrackPublication) => {
+        if (publication.track?.kind === Track.Kind.Video) {
+          const requestedCodec = publication.source === Track.Source.ScreenShare
+            ? useVoiceStore.getState().screenShareConfig.codec
+            : publication.source === Track.Source.Camera ? 'h264' : null;
+          const codec = requestedCodec === 'h264' ? 'h264' : null;
+          const mediaTrack = publication.track.mediaStreamTrack;
+          if (mediaTrack) attachH264SenderTransform(publication.track, mediaTrack, codec);
+        }
         if (publication.source === Track.Source.ScreenShare) {
           const { userId } = parseIdentity(newRoom.localParticipant.identity);
           useVoiceStore.getState().watchStream(userId);
@@ -946,6 +955,9 @@ export function useLiveKit() {
         guardedUpdate();
       });
       newRoom.on(RoomEvent.LocalTrackUnpublished, (publication: LocalTrackPublication) => {
+        if (publication.track?.kind === Track.Kind.Video) {
+          detachH264SenderTransform(publication.track);
+        }
         if (publication.source === Track.Source.ScreenShare) {
           // screenShare decides whether the share is over: a stop (ours, the
           // OS stop bar, the source ending) or a republish of the same share
@@ -1071,6 +1083,9 @@ export function useLiveKit() {
         }
       });
       newRoom.on(RoomEvent.Disconnected, (reason?: DisconnectReason) => {
+        newRoom.localParticipant.videoTrackPublications.forEach((publication) => {
+          if (publication.track) detachH264SenderTransform(publication.track);
+        });
         // A full reconnect that gave up: a share it had withdrawn ends here.
         settleScreenShareAfterReconnect(newRoom);
         if (roomRef.current !== newRoom) return;

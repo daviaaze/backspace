@@ -402,9 +402,9 @@ export const instanceSettings = sqliteTable('instance_settings', {
   maxBitrateKbps: integer('max_bitrate_kbps').notNull().default(20000),
   minBitrateKbps: integer('min_bitrate_kbps').notNull().default(500),
   bitrateStepKbps: integer('bitrate_step_kbps').notNull().default(500),
-  allowedResolutions: text('allowed_resolutions').notNull().default('540,720,1080'),
+  allowedResolutions: text('allowed_resolutions').notNull().default('540,720,1080,1440,2160,native'),
   allowedFramerates: text('allowed_framerates').notNull().default('30,45,60'),
-  maxResolution: integer('max_resolution').notNull().default(1080),
+  maxResolution: integer('max_resolution').notNull().default(2160),
   maxFramerate: integer('max_framerate').notNull().default(60),
   registrationOpen: integer('registration_open'),  // null = use env var default, 0/1 = explicit
   federatedRegistrationOpen: integer('federated_registration_open').notNull().default(1),
