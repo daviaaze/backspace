@@ -9,8 +9,8 @@ import { activate as activateHwOverdrive, deactivate as deactivateHwOverdrive } 
 import { useUIStore } from '../stores/uiStore';
 import { openScreenShareSetup } from '../stores/screenShareSetupStore';
 import i18n from '../i18n';
+import { canOpenAppSystemAudioSource, acquireAppExcludedSystemAudio } from './systemAudioSource';
 import { isElectron, getElectronAPI } from '../platform/platform';
-import { acquireAppExcludedSystemAudio } from './systemAudioSource';
 import type { InstanceStreamingLimits } from '@backspace/shared';
 import {
   STANDARD_RESOLUTIONS, STANDARD_FRAMERATES, WIDTH_MAP,
@@ -500,6 +500,7 @@ export async function publishScreenShare(
     _liveSource = source;
     // A published share is settled: nothing is left to wait for.
     _reconnectingRoom = null;
+    if (audioToPublish) await publishScreenShareAudioTrack(room, audioToPublish);
     if (capturedAudio && !audioToPublish) setAsideScreenShareAudio(capturedAudio);
     useVoiceStore.setState({
       isScreenSharing: true,
@@ -623,6 +624,8 @@ let _liveSource: LiveSource | null = null;
 let _heldAudio: MediaStreamTrack | null = null;
 /** Bumped when a share ends, so a capture that lands afterwards is dropped. */
 let _audioGeneration = 0;
+/** Pending interactive/native audio capture, cancelled when the share or toggle ends. */
+let _pendingAudioCapture: AbortController | null = null;
 
 /** A loopback capture that has not answered by then is given up on. */
 export const SCREEN_SHARE_AUDIO_CAPTURE_TIMEOUT_MS = 10_000;
@@ -632,33 +635,41 @@ function liveOrNull(track: MediaStreamTrack | null): MediaStreamTrack | null {
 }
 
 /**
- * Whether loopback audio can be added later, without a prompt, to a share of
- * this source: only the desktop app can, only for a source it listed itself
- * (picker mode `'app'`; a portal or an unknown mode would prompt again), and
- * only on a build that can preselect. The setup screen asks the same question
- * before Start.
+ * Linux's native audio selector is independent of the video picker/portal.
+ * Legacy loopback recapture still requires an app-listed video source.
  */
 export function canAddScreenShareAudioLater(
   sourceId: string | null,
   pickerMode: ScreenSharePickerMode | null,
 ): boolean {
-  return sourceId !== null
+  return canAcquireNativeAudio() || (
+    sourceId !== null
     && pickerMode === 'app'
     && isElectron()
     && isScreenCaptureSupported()
-    && typeof getElectronAPI()?.preselectScreenSource === 'function';
+    && typeof getElectronAPI()?.preselectScreenSource === 'function'
+  );
+}
+/** Native audio capability is independent of the share's video source. */
+function canAcquireNativeAudio(): boolean {
+  return isElectron() && getElectronAPI()?.platform === 'linux' && canOpenAppSystemAudioSource();
 }
 
-/** The live share's source, when audio can be added to it. */
+/** The live share's loopback source, when audio can be added without a picker. */
 function acquirableSourceId(): string | null {
-  if (!_liveSource) return null;
-  return canAddScreenShareAudioLater(_liveSource.id, _liveSource.pickerMode) ? _liveSource.id : null;
+  if (!_liveSource?.id || _liveSource.pickerMode !== 'app') return null;
+  return isElectron() && isScreenCaptureSupported()
+    && typeof getElectronAPI()?.preselectScreenSource === 'function'
+    ? _liveSource.id : null;
+}
+
+function canAcquireLiveAudio(): boolean {
+  return canAcquireNativeAudio() || acquirableSourceId() !== null;
 }
 
 /** The state of a share whose audio is not on the publication. */
 function idleScreenShareAudioState(): ScreenShareAudioState {
-  if (liveOrNull(_heldAudio)) return 'held';
-  return acquirableSourceId() !== null ? 'acquirable' : 'unavailable';
+  return liveOrNull(_heldAudio) ? 'held' : canAcquireLiveAudio() ? 'acquirable' : 'unavailable';
 }
 
 /**
@@ -666,14 +677,13 @@ function idleScreenShareAudioState(): ScreenShareAudioState {
  * kept (captured, sent nowhere) only where it cannot.
  */
 function setAsideScreenShareAudio(track: MediaStreamTrack): void {
-  if (acquirableSourceId() !== null) {
+  if (canAcquireLiveAudio()) {
     track.stop();
     return;
   }
   if (_heldAudio && _heldAudio !== track) _heldAudio.stop();
   _heldAudio = track;
 }
-
 function setScreenShareAudioState(state: ScreenShareAudioState): void {
   useVoiceStore.setState({ screenShareAudio: state });
 }
@@ -684,6 +694,8 @@ function setScreenShareAudioState(state: ScreenShareAudioState): void {
  * cleared first so the unpublish this causes reads as part of the stop.
  */
 function endScreenShareAudio(room: Room): void {
+  _pendingAudioCapture?.abort();
+  _pendingAudioCapture = null;
   _audioGeneration++;
   _heldAudio?.stop();
   _heldAudio = null;
@@ -743,25 +755,39 @@ function settleWithin<T>(promise: Promise<T>, ms: number, discard: (late: T) => 
  * audio, capture it again, and keep only the audio track. The main process
  * answers a preselected request without a picker.
  */
-async function acquireScreenShareAudio(sourceId: string): Promise<MediaStreamTrack> {
+async function acquireScreenShareAudio(sourceId: string | null, signal: AbortSignal): Promise<MediaStreamTrack> {
+  const ownFree = await acquireAppExcludedSystemAudio(signal);
+  if (ownFree) return ownFree;
+  signal.throwIfAborted();
+  if (sourceId === null) throw new DOMException('Loopback source is unavailable', 'NotSupportedError');
+  return settleWithin(
+    acquireLoopbackAudio(sourceId, signal),
+    SCREEN_SHARE_AUDIO_CAPTURE_TIMEOUT_MS,
+    (late) => late.stop(),
+  );
+}
+
+async function acquireLoopbackAudio(sourceId: string, signal: AbortSignal): Promise<MediaStreamTrack> {
   const api = getElectronAPI();
   if (!api?.preselectScreenSource) throw new DOMException('Source preselection is not available', 'NotSupportedError');
-  const ownFree = await acquireAppExcludedSystemAudio();
-  if (ownFree) return ownFree;
   await api.preselectScreenSource(sourceId, true);
+  signal.throwIfAborted();
   const config = useVoiceStore.getState().screenShareConfig;
   const stream = await navigator.mediaDevices.getDisplayMedia(
     buildCaptureConstraints({ ...config, shareAudio: true }, buildScreenShareOptions(config)),
   );
-  stream.getVideoTracks().forEach((t) => t.stop());
-  const audio = stream.getAudioTracks().find((t) => t.readyState === 'live');
+  if (signal.aborted) {
+    stopStagedCapture(stream);
+    signal.throwIfAborted();
+  }
+  stream.getVideoTracks().forEach((track) => track.stop());
+  const audio = stream.getAudioTracks().find((track) => track.readyState === 'live');
   if (!audio) {
     stopStagedCapture(stream);
     throw new DOMException('The capture returned no audio track', 'NotFoundError');
   }
   return audio;
 }
-
 /** Adding audio failed: the toggle goes back to what is actually sent, and says why. */
 function failScreenShareAudio(err: unknown): void {
   console.warn('[ScreenShare] Could not add system audio to the live share:', err);
@@ -785,7 +811,7 @@ export async function syncScreenShareAudio(room: Room): Promise<void> {
       return;
     }
     const mediaTrack = pub.track.mediaStreamTrack;
-    const canCaptureAgain = acquirableSourceId() !== null;
+    const canCaptureAgain = canAcquireLiveAudio();
     await room.localParticipant.unpublishTrack(pub.track, canCaptureAgain);
     const kept = canCaptureAgain ? null : liveOrNull(mediaTrack);
     if (kept) setAsideScreenShareAudio(kept);
@@ -812,24 +838,37 @@ export async function syncScreenShareAudio(room: Room): Promise<void> {
   }
 
   const sourceId = acquirableSourceId();
-  if (sourceId === null) {
+  if (sourceId === null && !canAcquireNativeAudio()) {
     setScreenShareAudioState('unavailable');
     return;
   }
 
   const generation = _audioGeneration;
+  const controller = new AbortController();
+  _pendingAudioCapture = controller;
+  const unsubscribe = useVoiceStore.subscribe((state) => {
+    if (!state.screenShareConfig.shareAudio || !state.isScreenSharing) controller.abort();
+  });
   setScreenShareAudioState('acquiring');
   let track: MediaStreamTrack;
   try {
-    // Bounded: this runs on the queue every live-settings change waits on.
-    track = await settleWithin(
-      acquireScreenShareAudio(sourceId),
-      SCREEN_SHARE_AUDIO_CAPTURE_TIMEOUT_MS,
-      (late) => late.stop(),
-    );
+    track = await acquireScreenShareAudio(sourceId, controller.signal);
   } catch (err) {
-    if (generation === _audioGeneration) failScreenShareAudio(err);
+    if (generation === _audioGeneration) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        const current = useVoiceStore.getState();
+        if (current.isScreenSharing) {
+          if (current.screenShareConfig.shareAudio) current.setScreenShareConfig({ shareAudio: false });
+          setScreenShareAudioState(idleScreenShareAudioState());
+        }
+      } else {
+        failScreenShareAudio(err);
+      }
+    }
     return;
+  } finally {
+    unsubscribe();
+    if (_pendingAudioCapture === controller) _pendingAudioCapture = null;
   }
   // The share ended while the capture was taken: nothing may keep it.
   if (generation !== _audioGeneration || !useVoiceStore.getState().isScreenSharing) {

@@ -6,6 +6,11 @@ const CHANNEL = 'audio-source-picker';
 let pending: Promise<AudioSelection | null> | null = null;
 let activePicker: BrowserWindow | null = null;
 
+/** The renderer releases its last acquisition while the native chooser is open. */
+export function cancelAudioSourcePicker(): void {
+  if (activePicker && !activePicker.isDestroyed()) activePicker.close();
+}
+
 export function chooseAudioSources(
   parentWindow: BrowserWindow,
   listSources: () => Array<AudioSource>,

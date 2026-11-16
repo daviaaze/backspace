@@ -23,12 +23,18 @@ function fakeTrack() {
   const track = {
     stop: vi.fn(),
     addEventListener: vi.fn((type: string, fn: () => void) => listeners.set(type, fn)),
+    removeEventListener: vi.fn((type: string, fn: () => void) => {
+      if (listeners.get(type) === fn) listeners.delete(type);
+    }),
   };
   return { track: track as unknown as MediaStreamTrack, raw: track, listeners };
 }
 
 function stubMedia(devices: Array<Partial<MediaDeviceInfo>>, track: MediaStreamTrack | undefined) {
-  const getUserMedia = vi.fn(async () => ({ getAudioTracks: () => (track ? [track] : []) }));
+  const getUserMedia = vi.fn(async () => ({
+    getAudioTracks: () => (track ? [track] : []),
+    getTracks: () => (track ? [track] : []),
+  }));
   const enumerateDevices = vi.fn(async () => devices as MediaDeviceInfo[]);
   vi.stubGlobal('navigator', { mediaDevices: { getUserMedia, enumerateDevices } });
   return { getUserMedia, enumerateDevices };
@@ -65,9 +71,9 @@ describe('acquireAppExcludedSystemAudio', () => {
     expect(api.stopSystemAudio).not.toHaveBeenCalled();
   });
 
-  it('returns null when starting throws, and unlinks in case it half-succeeded', async () => {
+  it('surfaces a start failure instead of broadening capture to loopback', async () => {
     api.startSystemAudio.mockRejectedValue(new Error('ipc'));
-    expect(await acquireAppExcludedSystemAudio()).toBeNull();
+    await expect(acquireAppExcludedSystemAudio()).rejects.toThrow('ipc');
     expect(api.stopSystemAudio).toHaveBeenCalledTimes(1);
   });
 
@@ -130,9 +136,9 @@ describe('acquireAppExcludedSystemAudio', () => {
     vi.useFakeTimers();
     api.startSystemAudio.mockResolvedValue({ ok: true, label: 'vencord-screen-share' });
     const media = stubMedia([{ kind: 'audioinput', label: 'Default', deviceId: 'default' }], undefined);
-    const pending = acquireAppExcludedSystemAudio();
+    const rejected = expect(acquireAppExcludedSystemAudio()).rejects.toMatchObject({ name: 'NotFoundError' });
     await vi.advanceTimersByTimeAsync(4000);
-    expect(await pending).toBeNull();
+    await rejected;
     expect(media.getUserMedia).not.toHaveBeenCalled();
     expect(api.stopSystemAudio).toHaveBeenCalledTimes(1);
   });
@@ -141,14 +147,14 @@ describe('acquireAppExcludedSystemAudio', () => {
     api.startSystemAudio.mockResolvedValue({ ok: true, label: 'vencord-screen-share' });
     const media = stubMedia([{ kind: 'audioinput', label: 'vencord-screen-share', deviceId: 'v' }], undefined);
     media.getUserMedia.mockRejectedValue(new DOMException('busy', 'NotReadableError'));
-    expect(await acquireAppExcludedSystemAudio()).toBeNull();
+    await expect(acquireAppExcludedSystemAudio()).rejects.toMatchObject({ name: 'NotReadableError' });
     expect(api.stopSystemAudio).toHaveBeenCalledTimes(1);
   });
 
   it('unlinks when the opened stream has no audio track', async () => {
     api.startSystemAudio.mockResolvedValue({ ok: true, label: 'vencord-screen-share' });
     stubMedia([{ kind: 'audioinput', label: 'vencord-screen-share', deviceId: 'v' }], undefined);
-    expect(await acquireAppExcludedSystemAudio()).toBeNull();
+    await expect(acquireAppExcludedSystemAudio()).rejects.toMatchObject({ name: 'NotFoundError' });
     expect(api.stopSystemAudio).toHaveBeenCalledTimes(1);
   });
 
@@ -158,7 +164,7 @@ describe('acquireAppExcludedSystemAudio', () => {
     const second = fakeTrack();
     const media = stubMedia([{ kind: 'audioinput', label: 'vencord-screen-share', deviceId: 'v' }], first.track);
     const a = await acquireAppExcludedSystemAudio();
-    media.getUserMedia.mockResolvedValue({ getAudioTracks: () => [second.track] });
+    media.getUserMedia.mockResolvedValue({ getAudioTracks: () => [second.track], getTracks: () => [second.track] });
     const b = await acquireAppExcludedSystemAudio();
     expect(api.startSystemAudio).toHaveBeenCalledTimes(1);
 
@@ -186,6 +192,96 @@ describe('acquireAppExcludedSystemAudio', () => {
     stubMedia([{ kind: 'audioinput', label: 'vencord-screen-share', deviceId: 'v' }], first.track);
     await Promise.all([acquireAppExcludedSystemAudio(), acquireAppExcludedSystemAudio()]);
     expect(api.startSystemAudio).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows the user more than ten seconds to finish choosing audio sources', async () => {
+    vi.useFakeTimers();
+    let choose!: (result: { ok: true; label: string }) => void;
+    api.startSystemAudio.mockReturnValue(new Promise((resolve) => { choose = resolve; }));
+    const { track } = fakeTrack();
+    const media = stubMedia([{ kind: 'audioinput', label: 'vencord-screen-share', deviceId: 'native' }], track);
+    const pending = acquireAppExcludedSystemAudio();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(media.getUserMedia).not.toHaveBeenCalled();
+    choose({ ok: true, label: 'vencord-screen-share' });
+    expect(await pending).toBe(track);
+    track.stop();
+  });
+
+  it('aborts a chooser that never replies and does not capture after a late reply', async () => {
+    let choose!: (result: { ok: true; label: string }) => void;
+    api.startSystemAudio.mockReturnValue(new Promise((resolve) => { choose = resolve; }));
+    const media = stubMedia([], undefined);
+    const controller = new AbortController();
+    const rejected = expect(acquireAppExcludedSystemAudio(controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    controller.abort();
+    await rejected;
+    expect(api.stopSystemAudio).toHaveBeenCalledTimes(1);
+    choose({ ok: true, label: 'vencord-screen-share' });
+    await Promise.resolve();
+    expect(media.getUserMedia).not.toHaveBeenCalled();
+  });
+  it('does not start IPC when already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const media = stubMedia([], undefined);
+    await expect(acquireAppExcludedSystemAudio(controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(api.startSystemAudio).not.toHaveBeenCalled();
+    expect(media.getUserMedia).not.toHaveBeenCalled();
+  });
+
+  it('stops tracks from a GUM promise that resolves after abort', async () => {
+    let finishCapture!: (stream: { getAudioTracks: () => MediaStreamTrack[]; getTracks: () => MediaStreamTrack[] }) => void;
+    let gumEntered!: () => void;
+    const enteredGum = new Promise<void>((resolve) => { gumEntered = resolve; });
+    const { track } = fakeTrack();
+    api.startSystemAudio.mockResolvedValue({ ok: true, label: 'vencord-screen-share' });
+    const media = stubMedia([{ kind: 'audioinput', label: 'vencord-screen-share', deviceId: 'native' }], track);
+    media.getUserMedia.mockImplementation(() => {
+      gumEntered();
+      return new Promise((resolve) => { finishCapture = resolve; });
+    });
+    const controller = new AbortController();
+    const acquisition = acquireAppExcludedSystemAudio(controller.signal);
+    const rejected = expect(acquisition).rejects.toMatchObject({ name: 'AbortError' });
+    try {
+      await enteredGum;
+      expect(media.getUserMedia).toHaveBeenCalledTimes(1);
+      controller.abort();
+      await rejected;
+      expect(api.stopSystemAudio).toHaveBeenCalledTimes(1);
+      finishCapture({ getAudioTracks: () => [track], getTracks: () => [track] });
+      await Promise.resolve();
+      expect(track.stop).toHaveBeenCalledTimes(1);
+    } finally {
+      controller.abort();
+      await rejected;
+    }
+  });
+
+
+  it('does not cancel another holder when only one overlapping acquisition is aborted', async () => {
+    let choose!: (result: { ok: true; label: string }) => void;
+    api.startSystemAudio.mockReturnValue(new Promise((resolve) => { choose = resolve; }));
+    const { track } = fakeTrack();
+    stubMedia([{ kind: 'audioinput', label: 'vencord-screen-share', deviceId: 'native' }], track);
+    const controller = new AbortController();
+    const first = expect(acquireAppExcludedSystemAudio(controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    const second = acquireAppExcludedSystemAudio();
+    controller.abort();
+    await first;
+    expect(api.stopSystemAudio).not.toHaveBeenCalled();
+    choose({ ok: true, label: 'vencord-screen-share' });
+    expect(await second).toBe(track);
+    track.stop();
+    expect(api.stopSystemAudio).toHaveBeenCalledTimes(1);
+  });
+
+  it('surfaces a cancelled selection without opening a default input or loopback', async () => {
+    api.startSystemAudio.mockResolvedValue({ ok: false, reason: 'cancelled' });
+    const media = stubMedia([], undefined);
+    await expect(acquireAppExcludedSystemAudio()).rejects.toMatchObject({ name: 'AbortError' });
+    expect(media.getUserMedia).not.toHaveBeenCalled();
   });
 });
 

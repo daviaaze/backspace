@@ -27,7 +27,7 @@ import {
 import { getUpdateCapability, isSandboxed } from './updateCapability';
 import { ownAudioInSystemAudio } from './systemAudioCapability';
 import { createSystemAudioController, withSystemAudioSource, type PatchBayModule } from './systemAudio';
-import { chooseAudioSources } from './audioSourcePicker';
+import { chooseAudioSources, cancelAudioSourcePicker } from './audioSourcePicker';
 import { loadDismissedVersion, setDismissedVersion } from './updateDismissal';
 import { purgeUpdaterCache } from './updaterCache';
 import {
@@ -905,6 +905,7 @@ function registerIpcHandlers(): void {
   });
   ipcMain.handle('system-audio-stop', (event) => {
     if (event.sender !== mainWindow?.webContents) return;
+    cancelAudioSourcePicker();
     systemAudio.stop();
   });
   // handle, not on: the renderer awaits this before calling getDisplayMedia(),

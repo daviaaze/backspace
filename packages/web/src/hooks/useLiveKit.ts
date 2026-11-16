@@ -2,6 +2,8 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import {
   Room,
   RoomEvent,
+  ParticipantEvent,
+  LocalVideoTrack,
   Track,
   Participant,
   RemoteParticipant,
@@ -888,15 +890,17 @@ export function useLiveKit() {
         }
         guardedUpdate();
       });
+      // Install before negotiation/first RTP frame. LocalTrackPublished is
+      // too late: Chromium's sender may already have selected its frame path.
+      newRoom.localParticipant.on(ParticipantEvent.LocalSenderCreated, (_sender, track) => {
+        if (!(track instanceof LocalVideoTrack)) return;
+        const requestedCodec = track.source === Track.Source.ScreenShare
+          ? useVoiceStore.getState().screenShareConfig.codec
+          : track.source === Track.Source.Camera ? 'h264' : null;
+        const codec = requestedCodec === 'h264' ? 'h264' : null;
+        attachH264SenderTransform(track, track.mediaStreamTrack, codec);
+      });
       newRoom.on(RoomEvent.LocalTrackPublished, (publication: LocalTrackPublication) => {
-        if (publication.track?.kind === Track.Kind.Video) {
-          const requestedCodec = publication.source === Track.Source.ScreenShare
-            ? useVoiceStore.getState().screenShareConfig.codec
-            : publication.source === Track.Source.Camera ? 'h264' : null;
-          const codec = requestedCodec === 'h264' ? 'h264' : null;
-          const mediaTrack = publication.track.mediaStreamTrack;
-          if (mediaTrack) attachH264SenderTransform(publication.track, mediaTrack, codec);
-        }
         if (publication.source === Track.Source.ScreenShare) {
           const { userId } = parseIdentity(newRoom.localParticipant.identity);
           useVoiceStore.getState().watchStream(userId);

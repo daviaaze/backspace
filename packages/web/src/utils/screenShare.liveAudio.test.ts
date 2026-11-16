@@ -41,6 +41,8 @@ type FakeTrack = {
   stop: ReturnType<typeof vi.fn>;
   applyConstraints: ReturnType<typeof vi.fn>;
   getSettings: () => MediaTrackSettings;
+  addEventListener: MediaStreamTrack['addEventListener'];
+  removeEventListener: MediaStreamTrack['removeEventListener'];
 };
 
 function makeTrack(kind: FakeTrack['kind'], id = `${kind}-1`): FakeTrack {
@@ -52,6 +54,8 @@ function makeTrack(kind: FakeTrack['kind'], id = `${kind}-1`): FakeTrack {
     stop: vi.fn(() => { track.readyState = 'ended'; }),
     applyConstraints: vi.fn().mockResolvedValue(undefined),
     getSettings: () => ({}),
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
   };
   return track;
 }
@@ -107,6 +111,22 @@ function installElectron(api: Partial<BackspaceElectronAPI> | null): void {
   else delete (window as { backspace?: unknown }).backspace;
 }
 
+function installNativeAudio(track: FakeTrack) {
+  const start = vi.fn().mockResolvedValue({ ok: true, label: 'vencord-screen-share' });
+  const stop = vi.fn().mockResolvedValue(undefined);
+  const getUserMedia = vi.fn().mockResolvedValue({
+    getAudioTracks: () => [track],
+    getTracks: () => [track],
+  });
+  installElectron({ platform: 'linux', startSystemAudio: start, stopSystemAudio: stop });
+  Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: {
+    getDisplayMedia,
+    getUserMedia,
+    enumerateDevices: vi.fn().mockResolvedValue([{ kind: 'audioinput', label: 'vencord-screen-share', deviceId: 'native-source' }]),
+  } });
+  return { start, stop, getUserMedia };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   installElectron(null);
@@ -119,6 +139,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   installElectron(null);
 });
 
@@ -394,6 +415,71 @@ describe('published audio ends with the share when the video ends by itself', ()
   });
 });
 
+describe('native audio with a Wayland video portal', () => {
+  it('waits for a human choice beyond the loopback deadline and publishes without recapturing video', async () => {
+    vi.useFakeTimers();
+    const audio = makeTrack('audio', 'native-audio');
+    const native = installNativeAudio(audio);
+    let choose!: (result: { ok: true; label: string }) => void;
+    native.start.mockReturnValue(new Promise((resolve) => { choose = resolve; }));
+    const { room, pubs } = fakeRoom();
+    setShareAudio(false);
+    await publishScreenShare(room, makeStream(makeTrack('video')), { sourceId: null, pickerMode: 'system' });
+    expect(useVoiceStore.getState().screenShareAudio).toBe('acquirable');
+    setShareAudio(true);
+    const syncing = syncScreenShareAudio(room);
+    try {
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(useVoiceStore.getState().screenShareAudio).toBe('acquiring');
+      expect(useVoiceStore.getState().screenShareConfig.shareAudio).toBe(true);
+      choose({ ok: true, label: 'vencord-screen-share' });
+      await syncing;
+      expect(pubs.get(Track.Source.ScreenShareAudio)?.track.mediaStreamTrack).toBe(audio);
+      expect(getDisplayMedia).not.toHaveBeenCalled();
+    } finally {
+      setShareAudio(false);
+      await syncing;
+      await stopScreenShare(room);
+    }
+  });
+
+  it('cancels a pending native choice when the toggle is turned off, without publishing a late result', async () => {
+    const native = installNativeAudio(makeTrack('audio', 'native-audio'));
+    let choose!: (result: { ok: true; label: string }) => void;
+    native.start.mockReturnValue(new Promise((resolve) => { choose = resolve; }));
+    const { room, pubs } = fakeRoom();
+    setShareAudio(false);
+    await publishScreenShare(room, makeStream(makeTrack('video')), { sourceId: null, pickerMode: 'system' });
+    setShareAudio(true);
+    const syncing = syncScreenShareAudio(room);
+    setShareAudio(false);
+    await syncing;
+    expect(pubs.has(Track.Source.ScreenShareAudio)).toBe(false);
+    expect(native.stop).toHaveBeenCalledTimes(1);
+    choose({ ok: true, label: 'vencord-screen-share' });
+    await Promise.resolve();
+    expect(native.getUserMedia).not.toHaveBeenCalled();
+    expect(getDisplayMedia).not.toHaveBeenCalled();
+    await stopScreenShare(room);
+  });
+
+  it('treats native chooser cancellation as cancellation, not permission to capture all playback', async () => {
+    const native = installNativeAudio(makeTrack('audio', 'native-audio'));
+    native.start.mockResolvedValue({ ok: false, reason: 'cancelled' });
+    const { room, pubs } = fakeRoom();
+    setShareAudio(false);
+    await publishScreenShare(room, makeStream(makeTrack('video')), { sourceId: null, pickerMode: 'system' });
+    setShareAudio(true);
+    await syncScreenShareAudio(room);
+    expect(useVoiceStore.getState().screenShareConfig.shareAudio).toBe(false);
+    expect(pubs.has(Track.Source.ScreenShareAudio)).toBe(false);
+    expect(getDisplayMedia).not.toHaveBeenCalled();
+    expect(native.getUserMedia).not.toHaveBeenCalled();
+    expect(useUIStore.getState().toasts).toEqual([]);
+    await stopScreenShare(room);
+  });
+});
+
 describe('canAddScreenShareAudioLater (the setup screen asks it before Start)', () => {
   it('is true for a source the desktop app listed and can preselect', () => {
     installElectron({ preselectScreenSource: vi.fn() } as Partial<BackspaceElectronAPI>);
@@ -418,5 +504,13 @@ describe('canAddScreenShareAudioLater (the setup screen asks it before Start)', 
 
   it('is false in a browser', () => {
     expect(canAddScreenShareAudioLater('screen:0:0', 'app')).toBe(false);
+  });
+  it('allows Linux native audio for an app-picked share without a source id', () => {
+    installElectron({
+      platform: 'linux',
+      startSystemAudio: vi.fn(),
+      stopSystemAudio: vi.fn(),
+    } as unknown as Partial<BackspaceElectronAPI>);
+    expect(canAddScreenShareAudioLater(null, 'app')).toBe(true);
   });
 });

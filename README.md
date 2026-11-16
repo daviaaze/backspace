@@ -44,16 +44,34 @@ caller-supplied feature flags. Update the server to this branch's image before
 updating the desktop: older/upstream interfaces do not install the encoded-video
 repair worker and may display black video from affected hardware encoders.
 
+The H.264 repair now attaches at LiveKit's `LocalSenderCreated` event, before
+negotiation, rather than waiting for `RoomEvent.LocalTrackPublished`. In an
+isolated LiveKit SDK test, the early hook produced 74 decoded frames versus zero
+with the late hook. Screen-share audio now publishes the initially captured
+track. Native PipeWire audio capture can be added after the Wayland portal
+returns the video stream; choosing sources manually is not subject to the
+10-second loopback-only deadline, and canceling aborts that audio acquisition
+instead of falling back to all-app/system audio.
+
 Fresh instances offer resolutions through 2160p and native capture. Existing
 instances retain their stored policy; an admin must enable 2160p/native in
 Instance Settings → Streaming. A resolution is a capture target, not a guarantee
 that WebRTC will retain it under CPU/bandwidth pressure. The text preset prefers
 maintaining resolution; the gaming preset permits resolution/FPS adaptation.
+The existing 4K/native policy remains manual; this fix does not change it.
 
 The H.264 repair was causally verified with synthetic WebRTC on an RX 6700 XT:
-116 frames encoded and decoded by VA-API with no dropped frames. This is not a
-claim of a completed LiveKit call between two computers. Nix packaging and
-deployment instructions are in [backspace-nix](https://github.com/daviaaze/backspace-nix).
+116 frames encoded and decoded by VA-API with no dropped frames. Synthetic
+received audio measured RMS 0.04988 with a sink. These are not tests between two
+external hosts or a claim that the user's microphone/audio capture was tested.
+Nix packaging and deployment instructions are in
+[backspace-nix](https://github.com/daviaaze/backspace-nix).
+
+Validation of this regression fix includes type checking, lint, 53 focused
+media tests, real native-picker cancellation and synthetic audio/video received
+through an isolated LiveKit server. The full local workspace suite is not
+reported as green: unchanged Cloudflare Workers test runners timed out, including
+under bounded concurrency. This test-environment limitation remains recorded.
 
 ## What makes Backspace different
 

@@ -156,7 +156,7 @@ interface BackspaceElectronAPI {
    */
   startSystemAudio?: () => Promise<
     | { ok: true; label: string }
-    | { ok: false; reason: 'unsupported-platform' | 'sandboxed' | 'module-missing' | 'no-pipewire' | 'link-failed' }
+    | { ok: false; reason: 'unsupported-platform' | 'sandboxed' | 'module-missing' | 'no-pipewire' | 'link-failed' | 'cancelled' | 'no-sources-selected' }
   >;
   stopSystemAudio?: () => Promise<void>;
 
