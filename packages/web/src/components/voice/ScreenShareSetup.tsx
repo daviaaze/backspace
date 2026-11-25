@@ -37,8 +37,8 @@ import { pickAutoStageSource, type ScreenSourceTab } from '../../utils/screenSha
  *   - Electron on a system-picker platform (Wayland): same "Choose" card,
  *     but the OS screencast portal does the picking. Listing sources up front
  *     would open the portal on every open, so nothing is enumerated until the
- *     click; the main process answers the request with a placeholder so the
- *     capture's own portal session is the only prompt.
+ *     click; the main process answers the request with the portal's single
+ *     result.
  *   - Browser: the "Choose" card calls getDisplayMedia() and the browser's
  *     own prompt does the picking. Must happen inside the click (transient
  *     activation), which is why the choice is a button and not automatic.
