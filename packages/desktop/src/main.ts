@@ -1413,6 +1413,24 @@ if (!gotTheLock) {
           return;
         }
 
+        // System picker (Wayland portal), Electron 43: getSources() opens one
+        // portal session (and picker), and the capture that callback({ video })
+        // starts opens a SECOND one, so the user is asked twice and the stream
+        // is whatever they chose in the second dialog. Skip enumeration and hand
+        // Chromium a placeholder: its capturer then opens the only portal
+        // session, and the user's single choice (screen or window) is the stream.
+        // Default audio off for the same reason as the branch below: this path
+        // answers without consulting the renderer.
+        if (currentPickerMode() === 'system') {
+          const shareAudio = lastSystemPickerShareAudio ?? false;
+          console.log('[Main:ScreenShare] System picker: deferring source choice to the capture portal session, audio:', shareAudio);
+          callback({
+            video: { id: 'screen:0:0', name: 'Screen' } as unknown as Electron.DesktopCapturerSource,
+            ...(shareAudio && !suppressSystemAudioLoopback ? { audio: 'loopback' } : {}),
+          });
+          return;
+        }
+
         const sources = await enumerateScreenSources();
         console.log('[Main:ScreenShare] Got', sources.length, 'sources');
 
@@ -1420,19 +1438,6 @@ if (!gotTheLock) {
           console.warn('[Main:ScreenShare] No sources — Screen Recording permission may not be granted, or the system picker was cancelled');
           // @ts-ignore — Electron throws if we pass {} when video was requested; pass nothing to deny
           callback();
-          return;
-        }
-
-        // System picker (Wayland portal): the user already chose in the
-        // portal dialog and this is the only source it returned. Answer
-        // directly instead of showing a one-tile grid.
-        if (currentPickerMode() === 'system' && sources.length === 1) {
-          // Default off: this branch answers without consulting the renderer, so
-          // a web client too old to send a preference must not have its audio
-          // captured against the setting it thinks is in force.
-          const shareAudio = lastSystemPickerShareAudio ?? false;
-          console.log('[Main:ScreenShare] System picker returned one source:', sources[0]!.id, 'audio:', shareAudio);
-          callback({ video: sources[0]!, ...(shareAudio && !suppressSystemAudioLoopback ? { audio: 'loopback' } : {}) });
           return;
         }
 
