@@ -79,6 +79,9 @@ interface DesktopUpdateSnapshot {
 }
 
 interface BackspaceElectronAPI {
+  // Optional: the current shell supports native pop-out pinning; older shells do not.
+  setPopoutAlwaysOnTop?: (name: string, pinned: boolean) => Promise<boolean>;
+  getPopoutAlwaysOnTop?: (name: string) => Promise<boolean>;
   // Platform info
   platform: NodeJS.Platform;
   // Window controls
@@ -153,7 +156,7 @@ interface BackspaceElectronAPI {
    */
   startSystemAudio?: () => Promise<
     | { ok: true; label: string }
-    | { ok: false; reason: 'unsupported-platform' | 'sandboxed' | 'module-missing' | 'no-pipewire' | 'link-failed' }
+    | { ok: false; reason: 'unsupported-platform' | 'sandboxed' | 'module-missing' | 'no-pipewire' | 'link-failed' | 'cancelled' | 'no-sources-selected' }
   >;
   stopSystemAudio?: () => Promise<void>;
 

@@ -163,7 +163,13 @@
     "watch": "Смотреть трансляцию",
     "watchShort": "Смотреть",
     "mute": "Заглушить трансляцию",
-    "isStreaming": "{{name}} ведёт трансляцию"
+    "isStreaming": "{{name}} ведёт трансляцию",
+    "popout": "Открыть в отдельном окне",
+    "popoutPlaceholder": "Трансляция в отдельном окне",
+    "popoutReturn": "Вернуть",
+    "popoutClose": "Закрыть",
+    "pin": "Поверх остальных окон",
+    "unpin": "Открепить"
   },
   "streamDiagnostics": {
     "publisherNetwork": "Нестабильная сеть у транслирующего",

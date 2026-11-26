@@ -125,3 +125,34 @@ describe('VoiceGrid participant strip', () => {
     expect(document.activeElement).toBe(toggleBtn);
   });
 });
+
+describe('VoiceGrid stream pop-outs', () => {
+  it('hides pop-out controls with idle fullscreen chrome while preserving keyboard reveal', () => {
+    const sharer = participant('bob', false);
+    sharer.isScreenSharing = true;
+    sharer.screenTrack = {
+      readyState: 'live',
+      getSettings: () => ({ height: 1080, frameRate: 30 }),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    };
+    sharer.lkScreenTrack = { attach: vi.fn(), detach: vi.fn() };
+    useVoiceStore.setState({
+      focusedParticipantId: 'bob:stream',
+      watchingStreams: new Set(['bob']),
+    });
+    const participants = [participant('ada', true), sharer];
+    const { rerender } = render(
+      <VoiceGrid participants={participants} fullscreen chromeRevealed={false} />,
+    );
+
+    const controls = screen.getByRole('button', { name: 'Pop out stream' }).parentElement;
+    expect(controls).toHaveClass('opacity-0', 'pointer-events-none');
+    expect(controls).not.toHaveClass('group-hover:opacity-100');
+    expect(controls).toHaveClass('focus-within:opacity-100', 'focus-within:pointer-events-auto');
+
+    rerender(<VoiceGrid participants={participants} fullscreen chromeRevealed />);
+    expect(controls).toHaveClass('group-hover:opacity-100');
+    expect(controls).not.toHaveClass('pointer-events-none');
+  });
+});

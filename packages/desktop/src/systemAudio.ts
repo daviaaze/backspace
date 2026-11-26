@@ -1,5 +1,5 @@
 /**
- * System audio for a screen share without Backspace's own playback (#358).
+ * Playback stream selection is built from PipeWire's current node metadata.
  *
  * Chromium can leave the app out of a loopback capture only on Windows 11 and
  * macOS 14.2+ (docs/systems/voice.md, "System Audio Loopback"). On Linux the
@@ -21,23 +21,60 @@ export const SYSTEM_AUDIO_SOURCE_LABEL = 'vencord-screen-share';
 export type NodeMatch = Record<string, string>;
 
 /** The part of `@vencord/venmic`'s `PatchBay` used here. */
+export type PipeWireNode = Record<string, unknown>;
 export interface PatchBayLike {
-  link(data: { exclude: NodeMatch[]; only_speakers: boolean; ignore_devices: boolean }): boolean;
+  list(): PipeWireNode[];
+  link(data: { include: NodeMatch[]; exclude: NodeMatch[]; only_speakers: boolean; only_default_speakers: boolean; ignore_devices: boolean; mute: boolean }): boolean;
   unlink(): void;
 }
+export interface AudioSource {
+  id: string;
+  name: string;
+  application: string;
+  pid?: string;
+}
 
+export type AudioSelection = { mode: 'all' } | { mode: 'selected'; sourceIds: string[] };
+
+const PLAYBACK_CLASS = 'Stream/Output/Audio';
+
+function cleanDisplay(value: unknown): string {
+  return typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim() : '';
+}
+
+function playbackNodes(nodes: PipeWireNode[], pids: readonly number[], executablePath: string): AudioSource[] {
+  const excludedPids = new Set(pids.filter((pid) => Number.isInteger(pid) && pid > 0).map(String));
+  const binary = baseName(executablePath).toLowerCase();
+  const sources: AudioSource[] = [];
+  for (const node of nodes) {
+    if (node['media.class'] !== PLAYBACK_CLASS) continue;
+    const id = cleanDisplay(node['object.serial']);
+    if (!id) continue;
+    const pid = cleanDisplay(node['application.process.id']);
+    const processBinary = cleanDisplay(node['application.process.binary']).toLowerCase();
+    if ((pid && excludedPids.has(pid)) || (binary && processBinary === binary)) continue;
+    const name = cleanDisplay(node['media.name']) || cleanDisplay(node['node.name']);
+    const application = cleanDisplay(node['application.name']);
+    if (name && application) sources.push({ id, name, application, ...(pid ? { pid } : {}) });
+  }
+  return sources;
+}
+
+
+ 
 export interface PatchBayModule {
   PatchBay: (new () => PatchBayLike) & { hasPipeWire(): boolean };
 }
 
 export type SystemAudioStart =
   | { ok: true; label: string }
-  | { ok: false; reason: 'unsupported-platform' | 'sandboxed' | 'module-missing' | 'no-pipewire' | 'link-failed' };
+  | { ok: false; reason: 'unsupported-platform' | 'sandboxed' | 'module-missing' | 'no-pipewire' | 'link-failed' | 'no-sources-selected' };
 
 export interface SystemAudioController {
   /** Whether `start` can work on this machine (platform, module, PipeWire). The module load is cached, the probe is not: PipeWire may come up later. */
   isAvailable(): boolean;
-  start(): SystemAudioStart;
+  listSources(): AudioSource[];
+  start(selection?: AudioSelection): SystemAudioStart;
   stop(): void;
 }
 
@@ -112,16 +149,41 @@ export function createSystemAudioController(deps: SystemAudioDeps): SystemAudioC
   return {
     isAvailable: () => reason() === null,
 
-    start(): SystemAudioStart {
+    listSources(): AudioSource[] {
+      if (reason() !== null) return [];
+      try {
+        bay ??= new (module as PatchBayModule).PatchBay();
+        return playbackNodes(bay.list(), deps.getPids(), deps.executablePath);
+      } catch (err) {
+        log('venmic source listing failed:', err);
+        return [];
+      }
+    },
+
+    start(selection: AudioSelection = { mode: 'all' }): SystemAudioStart {
       const unavailable = reason();
       if (unavailable) return { ok: false, reason: unavailable };
       try {
         bay ??= new (module as PatchBayModule).PatchBay();
-        // A second start relinks with the pids as they are now.
+        const current = playbackNodes(bay.list(), deps.getPids(), deps.executablePath);
+        const eligible = selection.mode === 'selected'
+          ? current.filter((source) => selection.sourceIds.includes(source.id))
+          : current;
+        if (selection.mode === 'selected' && eligible.length === 0) {
+          if (linked) bay.unlink();
+          linked = false;
+          return { ok: false, reason: 'no-sources-selected' };
+        }
+        const rules: NodeMatch[] = selection.mode === 'selected'
+          ? eligible.map((source) => ({ 'object.serial': source.id, 'media.class': PLAYBACK_CLASS }))
+          : [{ 'media.class': PLAYBACK_CLASS }];
         const ok = bay.link({
+          include: rules,
           exclude: buildExcludeNodes(deps.getPids(), deps.executablePath),
-          only_speakers: true,
+          only_speakers: false,
+          only_default_speakers: false,
           ignore_devices: true,
+          mute: false,
         });
         linked = ok;
         if (!ok) return { ok: false, reason: 'link-failed' };

@@ -27,6 +27,7 @@ import {
 import { getUpdateCapability, isSandboxed } from './updateCapability';
 import { ownAudioInSystemAudio } from './systemAudioCapability';
 import { createSystemAudioController, withSystemAudioSource, type PatchBayModule } from './systemAudio';
+import { chooseAudioSources, cancelAudioSourcePicker } from './audioSourcePicker';
 import { loadDismissedVersion, setDismissedVersion } from './updateDismissal';
 import { purgeUpdaterCache } from './updaterCache';
 import {
@@ -53,6 +54,8 @@ import {
 import { migrateUserData } from './userDataMigration';
 import { isNavigationAllowed } from './navigationPolicy';
 import { NotificationRetainer } from './notificationRetention';
+import { isPopoutWindowName, isPopoutWindowOpenAllowed } from './popoutPolicy';
+import { setHyprlandPinned } from './hyprlandPin';
 import {
   screenSharePickerMode,
   isPendingSelectionFresh,
@@ -85,6 +88,8 @@ app.setName('Backspace');
 }
 
 let mainWindow: BrowserWindow | null = null;
+const popoutWindows = new Map<string, BrowserWindow>();
+const popoutFloated = new Map<string, { value: boolean }>();
 const keybindManager = new KeybindManager();
 let tray: Tray | null = null;
 let isQuitting = false;
@@ -487,7 +492,26 @@ function createWindow(): void {
 
   // Intercept own-instance /join/* URLs so they open in-app instead of the
   // system browser. Other URLs continue to open externally.
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+  mainWindow.webContents.setWindowOpenHandler(({ url, frameName }) => {
+    if (isPopoutWindowOpenAllowed(frameName, url)) {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          width: 960,
+          height: 540,
+          minWidth: 320,
+          minHeight: 180,
+          autoHideMenuBar: true,
+          backgroundColor: '#0b0b10',
+          webPreferences: {
+            preload: path.join(__dirname, 'preload.js'),
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: true,
+          },
+        },
+      };
+    }
     try {
       const u = new URL(url);
       if (
@@ -503,6 +527,20 @@ function createWindow(): void {
       shell.openExternal(url);
     }
     return { action: 'deny' };
+  });
+  mainWindow.webContents.on('did-create-window', (win, details) => {
+    if (!isPopoutWindowName(details.frameName)) {
+      win.close();
+      return;
+    }
+    const name = details.frameName;
+    popoutWindows.set(name, win);
+    win.on('closed', () => {
+      if (popoutWindows.get(name) === win) {
+        popoutWindows.delete(name);
+        popoutFloated.delete(name);
+      }
+    });
   });
 
   // Deny foreign top-level navigations. See navigationPolicy.ts for the
@@ -596,6 +634,9 @@ const systemAudio = createSystemAudioController({
   isSandboxed,
   log: (message, ...args) => console.warn('[Main:SystemAudio]', message, ...args),
 });
+// Once Linux source selection is in use, never widen a failed/cancelled
+// selection to Chromium's whole-desktop loopback.
+let suppressSystemAudioLoopback = false;
 /** Last enumeration, so a preselected id resolves to its DesktopCapturerSource without a second scan. */
 let lastScreenSources: Electron.DesktopCapturerSource[] = [];
 /** Last list handed to the renderer, and when: what a throttled or unfocused caller gets back. */
@@ -634,6 +675,28 @@ function takePendingScreenSelection(): PendingScreenSelection | null {
 }
 
 function registerIpcHandlers(): void {
+  ipcMain.handle('popout-set-always-on-top', async (event, name: unknown, pinned: unknown) => {
+    if (!isPopoutWindowName(name) || typeof pinned !== 'boolean') return false;
+    const win = popoutWindows.get(name);
+    if (!win || win.isDestroyed()) return false;
+    if (event.sender !== mainWindow?.webContents && event.sender !== win.webContents) return false;
+    win.setAlwaysOnTop(pinned, 'floating');
+    // Wayland ignores always-on-top; Hyprland's "pin" is the equivalent.
+    if (process.platform === 'linux' && process.env.HYPRLAND_INSTANCE_SIGNATURE) {
+      const floated = popoutFloated.get(name) ?? { value: false };
+      popoutFloated.set(name, floated);
+      const result = await setHyprlandPinned(process.pid, 'io.github.TheZwiss.backspace', win.getTitle(), pinned, floated);
+      if (result !== null) return result;
+    }
+    return win.isAlwaysOnTop();
+  });
+  ipcMain.handle('popout-get-always-on-top', (event, name: unknown) => {
+    if (!isPopoutWindowName(name)) return false;
+    const win = popoutWindows.get(name);
+    if (!win || win.isDestroyed()) return false;
+    if (event.sender !== mainWindow?.webContents && event.sender !== win.webContents) return false;
+    return win.isAlwaysOnTop();
+  });
   ipcMain.on('show-notification', (event, data: { title: string; body: string; options?: { channelId?: string; spaceId?: string; userId?: string } }) => {
     if (event.sender !== mainWindow?.webContents) return;
     const sender = event.sender;
@@ -829,12 +892,20 @@ function registerIpcHandlers(): void {
   // The virtual source that carries every other app's playback (Linux). The
   // renderer opens it like a microphone and calls stop when the share, or its
   // audio, ends.
-  ipcMain.handle('system-audio-start', (event) => {
-    if (event.sender !== mainWindow?.webContents) return { ok: false, reason: 'unsupported-platform' };
-    return systemAudio.start();
+  ipcMain.handle('system-audio-start', async (event) => {
+    const parent = mainWindow;
+    if (!parent || event.sender !== parent.webContents) return { ok: false, reason: 'unsupported-platform' };
+    if (!systemAudio.isAvailable()) return systemAudio.start();
+    suppressSystemAudioLoopback = true;
+    const selection = await chooseAudioSources(parent, () => systemAudio.listSources());
+    if (!selection || parent.isDestroyed() || parent !== mainWindow) {
+      return { ok: false, reason: 'cancelled' };
+    }
+    return systemAudio.start(selection);
   });
   ipcMain.handle('system-audio-stop', (event) => {
     if (event.sender !== mainWindow?.webContents) return;
+    cancelAudioSourcePicker();
     systemAudio.stop();
   });
   // handle, not on: the renderer awaits this before calling getDisplayMedia(),
@@ -1220,7 +1291,13 @@ if (process.platform === 'linux') {
   // Without it, returning `audio: 'loopback'` from setDisplayMediaRequestHandler
   // fails the whole getDisplayMedia request — screen share never starts when the
   // user has "Share system audio" enabled.
-  app.commandLine.appendSwitch('enable-features', 'PulseaudioLoopbackForScreenShare');
+  // Opt into Chromium's Linux VA-API encoder and preserve caller features.
+  const requestedFeatures = app.commandLine.getSwitchValue('enable-features');
+  app.commandLine.appendSwitch('enable-features', [
+    requestedFeatures,
+    'PulseaudioLoopbackForScreenShare',
+    'AcceleratedVideoEncoder',
+  ].filter(Boolean).join(','));
 }
 
 // Windows: AppUserModelId so toast notifications attribute correctly to Backspace
@@ -1332,7 +1409,7 @@ if (!gotTheLock) {
             return;
           }
           console.log('[Main:ScreenShare] Using preselected source:', pending.sourceId, 'audio:', pending.shareAudio);
-          callback({ video: selected, ...(pending.shareAudio ? { audio: 'loopback' } : {}) });
+          callback({ video: selected, ...(pending.shareAudio && !suppressSystemAudioLoopback ? { audio: 'loopback' } : {}) });
           return;
         }
 
@@ -1355,7 +1432,7 @@ if (!gotTheLock) {
           // captured against the setting it thinks is in force.
           const shareAudio = lastSystemPickerShareAudio ?? false;
           console.log('[Main:ScreenShare] System picker returned one source:', sources[0]!.id, 'audio:', shareAudio);
-          callback({ video: sources[0]!, ...(shareAudio ? { audio: 'loopback' } : {}) });
+          callback({ video: sources[0]!, ...(shareAudio && !suppressSystemAudioLoopback ? { audio: 'loopback' } : {}) });
           return;
         }
 
@@ -1395,7 +1472,7 @@ if (!gotTheLock) {
         //     `PulseaudioLoopbackForScreenShare` feature flag we enable above.
         //     Fails on PipeWire-only systems without pulse compat — the
         //     renderer catches that and toasts the user.
-        callback({ video: selected, ...(shareAudio ? { audio: 'loopback' } : {}) });
+        callback({ video: selected, ...(shareAudio && !suppressSystemAudioLoopback ? { audio: 'loopback' } : {}) });
       } catch (err) {
         console.error('[Main:ScreenShare] Handler error:', err);
         // @ts-ignore — deny the request without crashing

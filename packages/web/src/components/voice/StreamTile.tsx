@@ -19,6 +19,7 @@ import {
   classifyStreamHealth,
   useStreamHealthWarning,
 } from '../../hooks/useStreamHealthWarning';
+import { openStreamPopout, type StreamPopout } from './streamPopout';
 
 interface StreamTileProps {
   tile: StreamTileType;
@@ -206,6 +207,8 @@ function handleViewerWatchToggle(sharer: StreamWatchTarget, watching: boolean): 
 export function StreamTile({ tile, large, edgeToEdge = false, chromeVisible = true, stats }: StreamTileProps) {
   const { t } = useTranslation(['voice', 'common']);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const popoutRef = useRef<StreamPopout | null>(null);
+  const [isPoppedOut, setIsPoppedOut] = useState(false);
 
   const watchingStreams = useVoiceStore((s) => s.watchingStreams);
 
@@ -222,6 +225,30 @@ export function StreamTile({ tile, large, edgeToEdge = false, chromeVisible = tr
 
   const liveScreenTrack = tile.screenTrack?.readyState === 'live' ? tile.screenTrack : null;
   const liveLkScreenTrack = liveScreenTrack ? tile.lkScreenTrack : null;
+  const streamKey = `${participant.identity}:${userId}`;
+  const openPopout = useCallback(() => {
+    if (!liveLkScreenTrack || !isWatching) return;
+    const popout = openStreamPopout(streamKey, displayName, liveLkScreenTrack, {
+      pin: t('voice:stream.pin'),
+      unpin: t('voice:stream.unpin'),
+      close: t('voice:stream.popoutClose'),
+    }, () => {
+      popoutRef.current = null;
+      setIsPoppedOut(false);
+    });
+    if (!popout) return;
+    popoutRef.current = popout;
+    setIsPoppedOut(true);
+  }, [liveLkScreenTrack, isWatching, streamKey, displayName, t]);
+  const restorePopout = useCallback(() => {
+    popoutRef.current?.close();
+    popoutRef.current = null;
+    setIsPoppedOut(false);
+  }, []);
+  useEffect(() => {
+    if (!isWatching || !liveLkScreenTrack) restorePopout();
+  }, [isWatching, liveLkScreenTrack, restorePopout]);
+  useEffect(() => () => { popoutRef.current?.close(); }, []);
 
   // Quality badge state: the raw dimensions, rendered through the catalog so a language switch relabels them.
   const [qualityBadge, setQualityBadge] = useState<{ height: number; fps: number | null } | null>(null);
@@ -254,13 +281,12 @@ export function StreamTile({ tile, large, edgeToEdge = false, chromeVisible = tr
   useEffect(() => {
     const videoEl = videoRef.current;
     if (!videoEl) return;
-    if (liveLkScreenTrack) {
+    if (liveLkScreenTrack && !isPoppedOut) {
       liveLkScreenTrack.attach(videoEl);
       return () => { liveLkScreenTrack.detach(videoEl); };
-    } else {
-      videoEl.srcObject = null;
     }
-  }, [liveLkScreenTrack]);
+    videoEl.srcObject = null;
+  }, [liveLkScreenTrack, isPoppedOut]);
 
   // Quality badge (poll every 3s)
   useEffect(() => {
@@ -374,6 +400,17 @@ export function StreamTile({ tile, large, edgeToEdge = false, chromeVisible = tr
             },
           });
         }
+        if (currentIsWatching && liveLkScreenTrack) {
+          items.push({
+            key: 'popout-stream',
+            type: 'action',
+            label: t('voice:stream.popout'),
+            onClick: openPopout,
+            icon: React.createElement('svg', { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'currentColor', className: 'flex-shrink-0' },
+              React.createElement('path', { d: 'M19 19H5V5h7V3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z' }),
+            ),
+          });
+        }
 
         items.push({ key: 'watch-sep', type: 'separator' });
 
@@ -408,7 +445,7 @@ export function StreamTile({ tile, large, edgeToEdge = false, chromeVisible = tr
 
       openContextMenu({ x: e.clientX, y: e.clientY }, items);
     },
-    [isLocal, userId, participant.identity, openContextMenu, t],
+    [isLocal, userId, participant.identity, openContextMenu, t, openPopout, liveLkScreenTrack],
   );
 
   const handleWatch = useCallback(() => {
@@ -431,7 +468,7 @@ export function StreamTile({ tile, large, edgeToEdge = false, chromeVisible = tr
       }`}
       onContextMenu={handleContextMenu}
     >
-      {hasVideo && isWatching ? (
+      {hasVideo && isWatching && !isPoppedOut ? (
         <video
           ref={videoRef}
           autoPlay
@@ -440,6 +477,16 @@ export function StreamTile({ tile, large, edgeToEdge = false, chromeVisible = tr
           className="w-full h-full object-contain bg-black"
         />
       ) : (
+        <>
+        {hasVideo && isWatching && isPoppedOut && (
+          <div data-testid="stream-tile-popout-placeholder" className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-surface-channel text-center px-4">
+            <p className="text-sm font-medium text-txt-primary">{t('voice:stream.popoutPlaceholder')}</p>
+            <button type="button" onClick={restorePopout} className="rounded bg-accent-primary px-3 py-1.5 text-xs font-semibold text-white hover:bg-accent-primary/80">
+              {t('voice:stream.popoutReturn')}
+            </button>
+          </div>
+        )}
+        {!isPoppedOut && (
         <div data-testid="stream-tile-placeholder" className={`w-full h-full min-h-0 flex items-center justify-center bg-surface-channel ${large ? 'px-4 py-6' : 'px-4 pt-9 pb-3'}`}>
           <div className={large ? 'flex flex-col items-center gap-3 min-w-0' : 'flex w-full max-w-[280px] min-w-0 items-center gap-3'}>
             <div className="relative flex-shrink-0">
@@ -461,8 +508,25 @@ export function StreamTile({ tile, large, edgeToEdge = false, chromeVisible = tr
             </div>
           </div>
         </div>
+        )}
+        </>
       )}
 
+      {hasVideo && isWatching && (
+        <div className={`absolute top-2 right-2 z-10 transition-opacity duration-300 ease-out focus-within:opacity-100 focus-within:pointer-events-auto ${
+          chromeVisible ? 'opacity-0 group-hover:opacity-100' : 'opacity-0 pointer-events-none'
+        }`}>
+          {isPoppedOut ? (
+            <button type="button" onClick={restorePopout} className="rounded bg-black/75 px-2 py-1 text-[11px] font-medium text-white hover:bg-black">
+              {t('voice:stream.popoutReturn')}
+            </button>
+          ) : (
+            <button type="button" onClick={openPopout} aria-label={t('voice:stream.popout')} title={t('voice:stream.popout')} className="rounded bg-black/75 px-2 py-1 text-[11px] font-medium text-white hover:bg-black">
+              {t('voice:stream.popout')}
+            </button>
+          )}
+        </div>
+      )}
       {/* LIVE badge — top left */}
       <div className={`absolute top-2 left-2 px-1.5 py-0.5 bg-accent-rose rounded text-[11px] font-bold text-white uppercase tracking-wide transition-opacity duration-300 ease-out ${overlayFade}`}>
         {t('voice:badges.live')}

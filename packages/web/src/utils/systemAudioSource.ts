@@ -57,37 +57,46 @@ type StartResult = Awaited<ReturnType<NonNullable<NonNullable<ReturnType<typeof 
 let holders = 0;
 let starting: Promise<StartResult> | null = null;
 
-/** `null` when the desktop app has no such source (or this is a browser): the caller keeps the loopback capture. */
-export async function acquireAppExcludedSystemAudio(): Promise<MediaStreamTrack | null> {
+/** `null` only when this desktop has no native source; a failed/cancelled selection never widens to loopback. */
+export async function acquireAppExcludedSystemAudio(signal?: AbortSignal): Promise<MediaStreamTrack | null> {
+  signal?.throwIfAborted();
   const api = getElectronAPI();
   if (!api?.startSystemAudio || !api.stopSystemAudio) return null;
 
   holders++;
   let dropped = false;
-  /** Give up this capture's share of the source; the link goes with the last one. */
   const drop = (unlink: boolean): void => {
     if (dropped) return;
     dropped = true;
     if (--holders > 0) return;
     starting = null;
-    if (unlink) void api.stopSystemAudio?.().catch(() => undefined);
+    if (unlink) {
+      void api.stopSystemAudio?.().catch((error) => {
+        console.warn('[ScreenShare] Could not release the system-audio source:', error);
+      });
+    }
   };
+  const onAbort = () => drop(true);
+  signal?.addEventListener('abort', onAbort, { once: true });
 
   try {
     starting ??= api.startSystemAudio();
-    const result = await starting;
+    const result = await abortableCapture(starting, signal);
     if (!result.ok) {
-      drop(false);
-      return null;
+      const unavailable = ['unsupported-platform', 'sandboxed', 'module-missing', 'no-pipewire'].includes(result.reason);
+      drop(!unavailable && result.reason !== 'cancelled' && result.reason !== 'no-sources-selected');
+      if (unavailable) return null;
+      if (result.reason === 'cancelled') throw new DOMException('Audio selection cancelled', 'AbortError');
+      throw new DOMException(
+        result.reason === 'no-sources-selected' ? 'The selected audio sources are no longer available' : 'Could not link the selected audio sources',
+        result.reason === 'no-sources-selected' ? 'NotFoundError' : 'NotReadableError',
+      );
     }
 
-    const deviceId = await waitForDevice(result.label);
-    if (!deviceId) {
-      console.warn('[ScreenShare] The system-audio source did not appear in the device list');
-      drop(true);
-      return null;
-    }
-    const stream = await navigator.mediaDevices.getUserMedia({
+    const deviceId = await waitForDevice(result.label, signal);
+    if (!deviceId) throw new DOMException('The system-audio source did not appear', 'NotFoundError');
+    signal?.throwIfAborted();
+    const capture = navigator.mediaDevices.getUserMedia({
       audio: {
         deviceId: { exact: deviceId },
         echoCancellation: false,
@@ -96,35 +105,59 @@ export async function acquireAppExcludedSystemAudio(): Promise<MediaStreamTrack 
         channelCount: 2,
       },
     });
+    const stream = await abortableCapture(capture, signal, (late) => late.getTracks().forEach((track) => track.stop()));
     const track = stream.getAudioTracks()[0];
     if (!track) {
-      drop(true);
-      return null;
+      stream.getTracks().forEach((other) => other.stop());
+      throw new DOMException('The selected source returned no audio track', 'NotFoundError');
     }
-    // The link lives as long as the tracks: stopping one, by any path that
-    // stops a capture track, gives up its share of it.
     const stopTrack = track.stop.bind(track);
+    const ended = () => drop(true);
     track.stop = (): void => {
+      track.removeEventListener('ended', ended);
       stopTrack();
       drop(true);
     };
-    track.addEventListener('ended', () => drop(true), { once: true });
+    track.addEventListener('ended', ended, { once: true });
     return track;
-  } catch (err) {
-    console.warn('[ScreenShare] The system-audio source could not be started or opened:', err);
-    // A start that threw may or may not have linked: take it down if nothing else holds it.
+  } catch (error) {
     drop(true);
-    return null;
+    if (!(error instanceof DOMException && error.name === 'AbortError')) {
+      console.warn('[ScreenShare] Could not open the selected system-audio source:', error);
+    }
+    throw error;
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
   }
 }
 
-async function waitForDevice(label: string): Promise<string | null> {
+/** Media APIs cannot abort in-flight GUM; discard its track if it arrives after cancellation. */
+function abortableCapture<T>(operation: Promise<T>, signal?: AbortSignal, discard?: (late: T) => void): Promise<T> {
+  if (!signal) return operation;
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason ?? new DOMException('Audio acquisition cancelled', 'AbortError'));
+    if (signal.aborted) abort();
+    else signal.addEventListener('abort', abort, { once: true });
+    operation.then((value) => {
+      signal.removeEventListener('abort', abort);
+      if (signal.aborted) {
+        discard?.(value);
+        abort();
+      } else resolve(value);
+    }, (error: unknown) => {
+      signal.removeEventListener('abort', abort);
+      reject(error);
+    });
+  });
+}
+
+async function waitForDevice(label: string, signal?: AbortSignal): Promise<string | null> {
   const deadline = Date.now() + DEVICE_WAIT_MS;
   for (;;) {
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    const found = devices.find((d) => d.kind === 'audioinput' && d.label.includes(label));
+    const devices = await abortableCapture(navigator.mediaDevices.enumerateDevices(), signal);
+    const found = devices.find((device) => device.kind === 'audioinput' && device.label.includes(label));
     if (found) return found.deviceId;
     if (Date.now() >= deadline) return null;
-    await new Promise((resolve) => setTimeout(resolve, DEVICE_POLL_MS));
+    await abortableCapture(new Promise<void>((resolve) => setTimeout(resolve, DEVICE_POLL_MS)), signal);
   }
 }

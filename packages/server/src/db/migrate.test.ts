@@ -2,6 +2,23 @@ import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
 import { ensureDefaults } from './migrate.js';
 
+describe('ensureDefaults streaming resolution defaults', () => {
+  it('offers every standard size through 4K and native for a new instance', () => {
+    const db = freshDb();
+    try {
+      ensureDefaults(db);
+      const limits = db.prepare('SELECT allowed_resolutions, max_resolution FROM instance_settings WHERE id = 1')
+        .get() as { allowed_resolutions: string; max_resolution: number };
+      expect(limits).toEqual({
+        allowed_resolutions: '540,720,1080,1440,2160,native',
+        max_resolution: 2160,
+      });
+    } finally {
+      db.close();
+    }
+  });
+});
+
 function freshDb(): Database.Database {
   const db = new Database(':memory:');
   db.exec(`CREATE TABLE instance_settings (id integer PRIMARY KEY, worker_id integer, instance_id text, max_bitrate_kbps integer, min_bitrate_kbps integer, bitrate_step_kbps integer, allowed_resolutions text, allowed_framerates text, max_resolution integer, max_framerate integer, installed_at integer, updated_at integer);

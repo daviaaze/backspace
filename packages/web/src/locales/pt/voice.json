@@ -163,7 +163,13 @@
     "watch": "Assistir à transmissão",
     "watchShort": "Assistir",
     "mute": "Silenciar transmissão",
-    "isStreaming": "{{name}} está transmitindo"
+    "isStreaming": "{{name}} está transmitindo",
+    "popout": "Abrir em janela separada",
+    "popoutPlaceholder": "Transmissão em janela separada",
+    "popoutReturn": "Trazer de volta",
+    "popoutClose": "Fechar",
+    "pin": "Manter no topo",
+    "unpin": "Desafixar"
   },
   "streamDiagnostics": {
     "publisherNetwork": "A rede de quem transmite está instável",
